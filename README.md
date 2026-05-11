@@ -94,9 +94,11 @@ openssl rand -hex 32
 
 ## 3. Build & push the container image
 
+The cluster pulls a public Docker Hub image. No imagePullSecret required.
+
 ```bash
-docker build -t ghcr.io/YOUR_GH_USER/fatsecret-mcp:0.1.0 .
-docker push  ghcr.io/YOUR_GH_USER/fatsecret-mcp:0.1.0
+docker build -t docker.io/christhonie/fatsecret-mcp:0.1.0 .
+docker push  docker.io/christhonie/fatsecret-mcp:0.1.0
 ```
 
 The image is `node:20-alpine`-based, runs as uid `1001`, listens on `:8000`,
@@ -106,42 +108,42 @@ and exposes a `/healthz` endpoint for the readiness/liveness probes.
 
 ## 4. Deploy to Kubernetes
 
-Update the image reference in [k8s/deployment.yaml](k8s/deployment.yaml#L31)
-and the hostname in [k8s/ingress.yaml](k8s/ingress.yaml#L29-L36)
-(`fatsecret-mcp.YOURDOMAIN.com`), then:
+Deployment is driven by ArgoCD. The Application manifest lives in
+[idl-xnl-jhb-rc01/argocd/fatsecret-mcp.yml](https://github.com/christhonie/idl-xnl-jhb-rc01/blob/main/argocd/fatsecret-mcp.yml)
+and syncs the [k8s/](k8s/) directory of this repo (with `secret.template.yaml`
+excluded). Pushing a commit to `master` here triggers an ArgoCD sync.
+
+The one manual prerequisite is the Secret — values must never enter git:
 
 ```bash
-# Namespace
-kubectl apply -f k8s/namespace.yaml
+export KUBECONFIG=/mnt/c/Users/chris/.kube/static/idl-xnl-jhb1-01.yaml
 
-# Secret — recommended: create imperatively to avoid checking values in.
-kubectl -n fatsecret-mcp create secret generic fatsecret-mcp-secrets \
+# Ensure the namespace exists (ArgoCD creates it too; harmless if it does).
+kubectl create namespace mcp --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl -n mcp create secret generic fatsecret-mcp-secrets \
   --from-literal=FATSECRET_CLIENT_ID=...           \
   --from-literal=FATSECRET_CLIENT_SECRET=...       \
   --from-literal=FATSECRET_CONSUMER_SECRET=...     \
   --from-literal=FATSECRET_ACCESS_TOKEN=...        \
   --from-literal=FATSECRET_ACCESS_TOKEN_SECRET=... \
   --from-literal=MCP_BEARER_TOKEN=...
-
-# Workload
-kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/service.yaml
-kubectl apply -f k8s/ingress.yaml
 ```
 
-Wait for cert-manager to issue the certificate:
+Watch the rollout and cert issuance:
 
 ```bash
-kubectl -n fatsecret-mcp get certificate fatsecret-mcp-tls -w
+kubectl -n mcp rollout status deployment/fatsecret-mcp
+kubectl -n mcp get certificate fatsecret-mcp-christhonie-co-za-tls -w
 ```
 
 Smoke test:
 
 ```bash
-curl -sS https://fatsecret-mcp.YOURDOMAIN.com/healthz
+curl -sS https://fatsecret-mcp.christhonie.co.za/healthz
 # → {"status":"ok"}
 
-curl -sS https://fatsecret-mcp.YOURDOMAIN.com/mcp -X POST \
+curl -sS https://fatsecret-mcp.christhonie.co.za/mcp -X POST \
   -H "Authorization: Bearer $MCP_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
@@ -157,7 +159,7 @@ curl -sS https://fatsecret-mcp.YOURDOMAIN.com/mcp -X POST \
 2. **Add custom connector**.
 3. Fields:
    - **Name**: `FatSecret`
-   - **Remote MCP server URL**: `https://fatsecret-mcp.YOURDOMAIN.com/mcp`
+   - **Remote MCP server URL**: `https://fatsecret-mcp.christhonie.co.za/mcp`
    - **Custom header**: `Authorization: Bearer <MCP_BEARER_TOKEN>`
 4. Save. claude.ai will call `initialize` and `tools/list`; you should see
    the FatSecret tool set show up. Test by asking "What did I eat today?"
@@ -217,7 +219,7 @@ disabled in HTTP mode.
   need an `emptyDir` volume mounted at `/home/app/.fatsecret-mcp/`.
 - **Token rotation.** When you regenerate the OAuth token (e.g. after
   revoking on FatSecret's side), re-run `npm run bootstrap`, update the
-  Secret, and `kubectl rollout restart deployment/fatsecret-mcp -n fatsecret-mcp`.
+  Secret, and `kubectl -n mcp rollout restart deployment/fatsecret-mcp`.
 - **Rotating the bearer token.** Change `MCP_BEARER_TOKEN` in the Secret,
   restart, then update the header in the claude.ai connector config.
 - **Egress IP.** If FatSecret IP restrictions are enabled, make sure your

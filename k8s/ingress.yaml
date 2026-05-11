@@ -1,24 +1,16 @@
-# Ingress for fatsecret-mcp.YOURDOMAIN.com
-#
-# Assumes:
-#   - An ingress controller is installed (nginx is the example below).
-#   - cert-manager is installed with a ClusterIssuer named "letsencrypt-prod".
-#     If yours is called something else, edit the annotation accordingly.
-#
-# claude.ai's custom MCP connector requires HTTPS and supports SSE-style
-# streaming responses, so we bump the proxy timeouts and disable buffering
-# on the nginx side.
+# nginx ingress + cert-manager (letsencrypt-prod) + external-dns (Cloudflare).
+# claude.ai's Streamable HTTP can hold SSE responses open, so proxy buffering
+# is disabled and read/send timeouts are extended.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: fatsecret-mcp
-  namespace: fatsecret-mcp
+  namespace: mcp
   annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
-    # Streamable HTTP can hold SSE responses open; keep the proxy from buffering
-    # or closing them prematurely.
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
@@ -27,10 +19,10 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts:
-        - fatsecret-mcp.YOURDOMAIN.com
-      secretName: fatsecret-mcp-tls
+        - fatsecret-mcp.christhonie.co.za
+      secretName: fatsecret-mcp-christhonie-co-za-tls
   rules:
-    - host: fatsecret-mcp.YOURDOMAIN.com
+    - host: fatsecret-mcp.christhonie.co.za
       http:
         paths:
           - path: /

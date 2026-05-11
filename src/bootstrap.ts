@@ -16,30 +16,15 @@
 
 import readline from 'node:readline/promises';
 import { exec } from 'node:child_process';
-import { stdin as input, stdout as output } from 'node:process';
+import { stdin as input, stderr as output } from 'node:process';
 import { requestToken, accessToken, type OAuth1Credentials } from './oauth1.js';
 
-async function prompt(rl: readline.Interface, q: string, secret = false): Promise<string> {
-  if (!secret) return (await rl.question(q)).trim();
-  // Minimal masked input for secrets so they don't show up in scrollback.
-  process.stdout.write(q);
-  return new Promise<string>((resolve) => {
-    const onData = (buf: Buffer) => {
-      const s = buf.toString('utf8');
-      if (s === '\n' || s === '\r' || s === '\r\n') {
-        process.stdin.removeListener('data', onData);
-        process.stdin.pause();
-        process.stdout.write('\n');
-        resolve(acc.trim());
-      } else {
-        acc += s;
-        process.stdout.write('*');
-      }
-    };
-    let acc = '';
-    process.stdin.resume();
-    process.stdin.on('data', onData);
-  });
+// All prompts and progress messages go to stderr so the caller can redirect
+// stdout to capture only the final env block (e.g. `node bootstrap.js > .env`).
+// Secrets are echoed while typing — this is a one-time bootstrap, clear your
+// terminal after running.
+async function prompt(rl: readline.Interface, q: string, _secret = false): Promise<string> {
+  return (await rl.question(q)).trim();
 }
 
 function openInBrowser(url: string): void {
@@ -99,7 +84,9 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('Bootstrap failed:', err instanceof Error ? err.message : err);
-  process.exit(1);
-});
+main()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error('Bootstrap failed:', err instanceof Error ? err.message : err);
+    process.exit(1);
+  });

@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: fatsecret-mcp
-  namespace: fatsecret-mcp
+  namespace: mcp
   labels:
     app.kubernetes.io/name: fatsecret-mcp
 spec:
@@ -30,8 +30,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: fatsecret-mcp
-          # Replace with your registry/image:tag.
-          image: ghcr.io/YOUR_GH_USER/fatsecret-mcp:latest
+          image: docker.io/christhonie/fatsecret-mcp:0.1.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

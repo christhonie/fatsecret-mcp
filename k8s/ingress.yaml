@@ -1,0 +1,42 @@
+# Ingress for fatsecret-mcp.YOURDOMAIN.com
+#
+# Assumes:
+#   - An ingress controller is installed (nginx is the example below).
+#   - cert-manager is installed with a ClusterIssuer named "letsencrypt-prod".
+#     If yours is called something else, edit the annotation accordingly.
+#
+# claude.ai's custom MCP connector requires HTTPS and supports SSE-style
+# streaming responses, so we bump the proxy timeouts and disable buffering
+# on the nginx side.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fatsecret-mcp
+  namespace: fatsecret-mcp
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # Streamable HTTP can hold SSE responses open; keep the proxy from buffering
+    # or closing them prematurely.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - fatsecret-mcp.YOURDOMAIN.com
+      secretName: fatsecret-mcp-tls
+  rules:
+    - host: fatsecret-mcp.YOURDOMAIN.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fatsecret-mcp
+                port:
+                  number: 8000

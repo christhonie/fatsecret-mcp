@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+.gitignore
+.env
+.env.*
+*.md
+!README.md
+k8s
+utils
+.claude
+.vscode
+.idea
+Dockerfile
+.dockerignore
+npm-debug.log*

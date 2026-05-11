@@ -5,6 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import createClient, { type Middleware } from 'openapi-fetch';
 import type { paths as PublicPaths } from './generated/public-api.js';
@@ -43,8 +44,15 @@ interface Config {
 
 // ── Server ──
 
-class FatSecretMcpServer {
-  private server: McpServer;
+export interface FatSecretMcpServerOptions {
+  /** When false, omits setup_credentials / start_auth / complete_auth tools.
+   * Use false for the remote HTTP deployment where credentials come from env
+   * and runtime re-auth would silently desync from the K8s Secret. */
+  allowAuthTools?: boolean;
+}
+
+export class FatSecretMcpServer {
+  public server: McpServer;
   private clientId = '';
   private clientSecret = '';
 
@@ -57,7 +65,7 @@ class FatSecretMcpServer {
   private oauth1Credentials: OAuth1Credentials;
   private pendingOAuth: { token: string; secret: string } | null = null;
 
-  constructor() {
+  constructor(opts: FatSecretMcpServerOptions = {}) {
     this.oauth1Credentials = { consumerKey: '', consumerSecret: '' };
 
     // Load config: persistent file first, env vars override
@@ -89,10 +97,8 @@ class FatSecretMcpServer {
     };
     this.profileClient.use(oauth1Middleware);
 
-    this.server = new McpServer(
-      { name: 'fatsecret-mcp', version },
-      {
-        instructions: [
+    const instructions = opts.allowAuthTools !== false
+      ? [
           'FatSecret MCP server provides two levels of access:',
           '',
           '1. SETUP: If API credentials are not configured, call check_auth_status first.',
@@ -107,8 +113,22 @@ class FatSecretMcpServer {
           '   call check_auth_status to see if the user is authenticated.',
           '   If not, guide them through: start_auth → user visits URL and authorizes → complete_auth with verifier PIN.',
           '   All credentials and tokens persist across sessions in ~/.fatsecret-mcp/config.json.',
-        ].join('\n'),
-      },
+        ].join('\n')
+      : [
+          'FatSecret MCP server (remote deployment, single-user mode).',
+          'API credentials and the OAuth 1.0a user token are preconfigured via environment variables.',
+          'All tools are available immediately; there is no per-session auth handshake.',
+          '',
+          'PUBLIC tools (food / recipe search, barcode lookup, references) use OAuth 2.0.',
+          'PROFILE tools (food diary, weight, exercises, favorites, saved meals, profile) act',
+          'on the diary of the user who bootstrapped the deployment.',
+          '',
+          'Dates are accepted in YYYY-MM-DD format; defaults to today where applicable.',
+        ].join('\n');
+
+    this.server = new McpServer(
+      { name: 'fatsecret-mcp', version },
+      { instructions },
     );
 
     this.registerPublicFoodTools();
@@ -120,7 +140,9 @@ class FatSecretMcpServer {
     this.registerWeightTools();
     this.registerExerciseTools();
     this.registerProfileTools();
-    this.registerAuthTools();
+    if (opts.allowAuthTools !== false) {
+      this.registerAuthTools();
+    }
   }
 
   // ── Config Management ──
@@ -151,8 +173,8 @@ class FatSecretMcpServer {
     this.oauth1Credentials = {
       consumerKey: this.clientId,
       consumerSecret,
-      accessToken: fileConfig.accessToken,
-      accessTokenSecret: fileConfig.accessTokenSecret,
+      accessToken: process.env.FATSECRET_ACCESS_TOKEN || fileConfig.accessToken,
+      accessTokenSecret: process.env.FATSECRET_ACCESS_TOKEN_SECRET || fileConfig.accessTokenSecret,
     };
 
     // 3. Log credential sources
@@ -162,7 +184,7 @@ class FatSecretMcpServer {
       return 'not set';
     };
     console.error(`Credentials: clientId=${src('FATSECRET_CLIENT_ID', fileConfig.clientId)}, clientSecret=${src('FATSECRET_CLIENT_SECRET', fileConfig.clientSecret)}, consumerSecret=${src('FATSECRET_CONSUMER_SECRET', fileConfig.consumerSecret)}`);
-    console.error(`OAuth 1.0 tokens: ${fileConfig.accessToken ? 'loaded from config file' : 'not set'}`);
+    console.error(`OAuth 1.0 tokens: accessToken=${src('FATSECRET_ACCESS_TOKEN', fileConfig.accessToken)}, accessTokenSecret=${src('FATSECRET_ACCESS_TOKEN_SECRET', fileConfig.accessTokenSecret)}`);
   }
 
   private saveConfig(updates: Partial<Config>): void {
@@ -1015,12 +1037,22 @@ class FatSecretMcpServer {
   }
 }
 
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
-});
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled rejection:', err);
-});
+const isMain = (() => {
+  try {
+    return process.argv[1] != null && fileURLToPath(import.meta.url) === process.argv[1];
+  } catch {
+    return false;
+  }
+})();
 
-const server = new FatSecretMcpServer();
-server.run().catch(console.error);
+if (isMain) {
+  process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err);
+  });
+  process.on('unhandledRejection', (err) => {
+    console.error('Unhandled rejection:', err);
+  });
+
+  const server = new FatSecretMcpServer();
+  server.run().catch(console.error);
+}

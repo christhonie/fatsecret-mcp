@@ -1,210 +1,233 @@
-# FatSecret MCP Server <img src="https://cdn.prod.website-files.com/6854cb4b7a1b8e39612d89cf/685543fddca41e9e9ce5ae5f_fatsecret_logo-op.png" alt="FatSecret Logo" height="28" />
+# FatSecret MCP — Remote / Streamable HTTP
 
-> [!IMPORTANT]
-> This is **not an official MCP server** by FatSecret.
-> It uses the [FatSecret Platform API](https://platform.fatsecret.com/) which requires a free developer account.
+A remote MCP server that exposes your FatSecret nutrition diary to
+[claude.ai](https://claude.ai) as a custom connector over HTTPS.
 
-An MCP (Model Context Protocol) server that connects Claude/Cursor to the [FatSecret Platform API](https://platform.fatsecret.com/). Search foods, track your diet, manage recipes, and monitor weight directly from your AI assistant.
+Forked from [fliptheweb/fatsecret-mcp](https://github.com/fliptheweb/fatsecret-mcp).
+This fork swaps the stdio transport for **Streamable HTTP**
+(MCP spec 2025-03-26+), gates the endpoint with a shared bearer token, and
+adds a Dockerfile + Kubernetes manifests for deployment behind a TLS
+ingress with cert-manager.
 
-**Available on NPM**: `npx fatsecret-mcp` | **Claude Desktop Extension**: [fatsecret-mcp.mcpb](https://github.com/fliptheweb/fatsecret-mcp/releases/latest/download/fatsecret-mcp.mcpb)
+The upstream tool set (~40 tools: food search, recipes, food diary, monthly
+nutrition summary, weight, exercises, favorites, saved meals) is preserved
+verbatim — only the transport layer and credential loading were changed.
 
-## ✨ Features
+---
 
-- 🔐 **Authentication** — Interactive credential setup and OAuth authorization
-- 🔍 **Food Search** — Search FatSecret's extensive food database with detailed nutrition data
-- 📷 **Barcode Lookup** — Find foods by GTIN-13 barcode
-- 🍳 **Recipe Search** — Browse and filter recipes by calories, macros, and prep time
-- 📝 **Food Diary** — Add, edit, copy, and delete food diary entries
-- 🍽️ **Saved Meals** — Create and manage reusable meal templates
-- ⚖️ **Weight Tracking** — Record and view weight history
-- 🏃‍♂️ **Exercise Tracking** — View exercises and manage activity entries
-- ⭐ **Favorites** — Manage favorite foods and recipes
+## Architecture
 
-## 🚀 Quick Start
-
-Add to your MCP client configuration:
-
-```json
-{
-  "mcpServers": {
-    "fatsecret": {
-      "command": "npx",
-      "args": ["-y", "fatsecret-mcp"]
-    }
-  }
-}
+```
+            HTTPS                bearer token             pre-authed
+claude.ai ──────────► Ingress ──────────────► /mcp ──────► FatSecret API
+                      (cert-manager,            │           (OAuth 1.0a)
+                       Let's Encrypt)           │
+                                    Deployment (1 replica)
+                                    └─ envFrom: fatsecret-mcp-secrets
 ```
 
-That's it! On first use, the AI will guide you through setup:
+- **Single-user.** The pre-authenticated OAuth 1.0a user token is provisioned
+  once locally via `npm run bootstrap` and baked into a Kubernetes Secret.
+  There is no per-user auth flow on the deployed instance — `start_auth`,
+  `complete_auth` and `setup_credentials` are deliberately disabled when
+  running over HTTP.
+- **Bearer-token auth.** All `/mcp` traffic must present
+  `Authorization: Bearer <MCP_BEARER_TOKEN>`. claude.ai supports custom
+  headers per connector.
+- **Stateful sessions.** The server allocates an `Mcp-Session-Id` on
+  initialize and keeps one in-memory MCP server per session, which also
+  lets the OAuth 2.0 cache (used for public food search) live across calls.
 
-1. **`check_auth_status`** — detects missing credentials and tells you what to do
-2. **`setup_credentials`** — you provide your API keys (saved to `~/.fatsecret-mcp/config.json`)
-3. **`start_auth`** → **`complete_auth`** — authorize your FatSecret account for diary/weight tools
+---
 
-Alternatively, you can pass credentials as environment variables:
+## Prerequisites
 
-```json
-{
-  "mcpServers": {
-    "fatsecret": {
-      "command": "npx",
-      "args": ["-y", "fatsecret-mcp"],
-      "env": {
-        "FATSECRET_CLIENT_ID": "your_client_id",
-        "FATSECRET_CLIENT_SECRET": "your_client_secret",
-        "FATSECRET_CONSUMER_SECRET": "your_consumer_secret"
-      }
-    }
-  }
-}
-```
+- Node.js 20+
+- Docker (for the container build)
+- `kubectl` access to a cluster with an ingress controller and cert-manager
+  (Let's Encrypt). The manifests assume nginx-ingress and a ClusterIssuer
+  named `letsencrypt-prod` — adjust if yours differ.
+- A registered FatSecret Platform developer application.
 
-### 🔑 Where to Get Credentials
+---
 
-1. Create a free account at [platform.fatsecret.com](https://platform.fatsecret.com/)
-2. Navigate to **My Account → API Keys**
-3. You'll see three values:
-   - **Client ID** (used for both OAuth 2.0 and OAuth 1.0)
-   - **Client Secret** (OAuth 2.0 - for public food/recipe search)
-   - **Consumer Secret** (OAuth 1.0 - for user profile/diary access)
+## 1. FatSecret platform setup
 
-📖 Step-by-step guide: [Getting Started with FatSecret API](https://github.com/fatsecret-group/postman-fatsecret-apis)
+1. Create a free account at <https://platform.fatsecret.com/>.
+2. **My Account → API Keys**. You'll see three values you need to capture:
+   - **Client ID** — used by both OAuth 2.0 (public food search) and OAuth 1.0a (signing as the consumer key).
+   - **Client Secret** — OAuth 2.0 secret, for public food / recipe endpoints.
+   - **Consumer Secret** — OAuth 1.0a secret, for user-scoped endpoints (food diary, weight, profile). This is **different** from the Client Secret.
+3. Under **My Account → Manage IP Restrictions**, either disable the IP
+   allow-list or add the egress IP(s) of your Kubernetes cluster. FatSecret
+   rejects API calls from unlisted IPs when restrictions are enabled.
 
-### Claude Desktop (Extension)
+---
 
-Download and open [fatsecret-mcp.mcpb](https://github.com/fliptheweb/fatsecret-mcp/releases/latest/download/fatsecret-mcp.mcpb) with Claude Desktop. You'll be prompted to enter your FatSecret credentials — secrets are stored securely in the OS keychain.
-
-See [Building Desktop Extensions with MCPB](https://support.claude.com/en/articles/12922929-building-desktop-extensions-with-mcpb) for more details.
-
-### Claude Desktop (Manual)
-
-`~/Library/Application Support/Claude/claude_desktop_config.json`
-
-### Claude Code (CLI)
+## 2. Bootstrap the OAuth 1.0a user token (one-time, local)
 
 ```bash
-claude mcp add fatsecret -- npx -y fatsecret-mcp
+npm install
+npm run build
+npm run bootstrap
 ```
 
-Or with env vars:
+The CLI prompts for the three credentials (or reads them from env if
+already exported), opens the FatSecret authorization page in your browser,
+asks for the verifier PIN, and prints a block of env vars to copy:
+
+```
+FATSECRET_CLIENT_ID=...
+FATSECRET_CLIENT_SECRET=...
+FATSECRET_CONSUMER_SECRET=...
+FATSECRET_ACCESS_TOKEN=...
+FATSECRET_ACCESS_TOKEN_SECRET=...
+```
+
+Also generate the bearer token that claude.ai will present:
 
 ```bash
-claude mcp add fatsecret \
-  -e FATSECRET_CLIENT_ID=your_client_id \
-  -e FATSECRET_CLIENT_SECRET=your_client_secret \
-  -e FATSECRET_CONSUMER_SECRET=your_consumer_secret \
-  -- npx -y fatsecret-mcp
+openssl rand -hex 32
 ```
 
-Verify with `claude mcp list`.
+---
 
-### Cursor
-
-- **Settings UI** — `Settings → MCP → + Add new MCP server`, then fill in the command, args, and env
-- **Project config** — add JSON to `.cursor/mcp.json` in your project root
-- **Global config** — add JSON to `~/.cursor/mcp.json`
-
-## 🛠️ Available Tools
-
-| Tool | Description |
-|------|-------------|
-| **🔐 Setup & Auth** | |
-| `check_auth_status` | Check if credentials and profile auth are configured. **Call this first.** |
-| `setup_credentials` | Save FatSecret API credentials to persistent config |
-| `start_auth` | Start OAuth 1.0 authorization — returns URL for user to visit |
-| `complete_auth` | Complete OAuth with verifier PIN from authorization page |
-| | |
-| **🔍 Food Search** *(public)* | |
-| `search_foods` | Search the food database |
-| `get_food` | Get detailed nutrition info for a food |
-| `find_food_by_barcode` | Find food by GTIN-13 barcode |
-| `autocomplete_foods` | Get search autocomplete suggestions |
-| | |
-| **🍳 Recipes** *(public)* | |
-| `search_recipes` | Search recipes with filters |
-| `get_recipe` | Get recipe details with ingredients and directions |
-| | |
-| **📚 Reference** *(public)* | |
-| `get_food_categories` | Get food categories |
-| `get_food_sub_categories` | Get food sub categories |
-| `get_brands` | Get food brands |
-| `get_recipe_types` | Get recipe types |
-| | |
-| **📝 Food Diary** *(profile auth)* | |
-| `get_food_entries` | Get food diary entries for a date |
-| `get_food_entries_month` | Get monthly nutrition summary (calories & macros per day) |
-| `create_food_entry` | Add a food diary entry |
-| `edit_food_entry` | Edit a food diary entry |
-| `delete_food_entry` | Delete a food diary entry |
-| `copy_food_entries` | Copy entries from one date to another |
-| `copy_saved_meal_entries` | Copy a saved meal to a date |
-| | |
-| **⭐ Favorites** *(profile auth)* | |
-| `get_favorite_foods` | Get favorite foods |
-| `delete_favorite_food` | Remove food from favorites |
-| `get_most_eaten_foods` | Get most eaten foods |
-| `get_recently_eaten_foods` | Get recently eaten foods |
-| `get_favorite_recipes` | Get favorite recipes |
-| `add_favorite_recipe` | Add recipe to favorites |
-| `delete_favorite_recipe` | Remove recipe from favorites |
-| | |
-| **🍽️ Saved Meals** *(profile auth)* | |
-| `get_saved_meals` | Get saved meals |
-| `create_saved_meal` | Create a saved meal |
-| `edit_saved_meal` | Edit a saved meal |
-| `delete_saved_meal` | Delete a saved meal |
-| `get_saved_meal_items` | Get items in a saved meal |
-| `add_saved_meal_item` | Add food to a saved meal |
-| `edit_saved_meal_item` | Edit saved meal item |
-| `delete_saved_meal_item` | Remove item from saved meal |
-| | |
-| **⚖️ Weight** *(profile auth)* | |
-| `update_weight` | Record weight for a date |
-| `get_weight_month` | Get weight history for a month |
-| | |
-| **🏃‍♂️ Exercise** *(profile auth)* | |
-| `get_exercises` | Get exercise types |
-| `edit_exercise_entries` | Shift exercise time between activities |
-| `get_exercise_entries_month` | Get exercise data for a month |
-| `save_exercise_template` | Save exercise template for weekdays |
-| | |
-| **👤 Profile** *(profile auth)* | |
-| `get_profile` | Get user profile info |
-| `create_food` | Create a custom food (Premier) |
-
-<sub>API reference: [FatSecret Postman Collection](https://www.postman.com/fatsecret/fatsecret-public-apis/)</sub>
-
-## 🧪 Test Connection
+## 3. Build & push the container image
 
 ```bash
-npx fatsecret-mcp
+docker build -t ghcr.io/YOUR_GH_USER/fatsecret-mcp:0.1.0 .
+docker push  ghcr.io/YOUR_GH_USER/fatsecret-mcp:0.1.0
 ```
 
-Or with env vars:
+The image is `node:20-alpine`-based, runs as uid `1001`, listens on `:8000`,
+and exposes a `/healthz` endpoint for the readiness/liveness probes.
+
+---
+
+## 4. Deploy to Kubernetes
+
+Update the image reference in [k8s/deployment.yaml](k8s/deployment.yaml#L31)
+and the hostname in [k8s/ingress.yaml](k8s/ingress.yaml#L29-L36)
+(`fatsecret-mcp.YOURDOMAIN.com`), then:
 
 ```bash
-FATSECRET_CLIENT_ID='...' FATSECRET_CLIENT_SECRET='...' FATSECRET_CONSUMER_SECRET='...' npx fatsecret-mcp
+# Namespace
+kubectl apply -f k8s/namespace.yaml
+
+# Secret — recommended: create imperatively to avoid checking values in.
+kubectl -n fatsecret-mcp create secret generic fatsecret-mcp-secrets \
+  --from-literal=FATSECRET_CLIENT_ID=...           \
+  --from-literal=FATSECRET_CLIENT_SECRET=...       \
+  --from-literal=FATSECRET_CONSUMER_SECRET=...     \
+  --from-literal=FATSECRET_ACCESS_TOKEN=...        \
+  --from-literal=FATSECRET_ACCESS_TOKEN_SECRET=... \
+  --from-literal=MCP_BEARER_TOKEN=...
+
+# Workload
+kubectl apply -f k8s/deployment.yaml
+kubectl apply -f k8s/service.yaml
+kubectl apply -f k8s/ingress.yaml
 ```
 
-## 📋 Requirements
-
-- Node.js 18+
-- FatSecret Platform API account ([platform.fatsecret.com](https://platform.fatsecret.com/))
-- MCP-compatible client (Claude Desktop, Cursor, etc.)
-
-## 🔧 Development
-
-1. Clone the repository
-2. `npm install`
-3. Copy `.env.example` to `.env` and fill in your credentials
-4. `npm run dev` to run in development mode
-
-Debugging with MCP Inspector:
+Wait for cert-manager to issue the certificate:
 
 ```bash
-FATSECRET_CLIENT_ID=X FATSECRET_CLIENT_SECRET=X FATSECRET_CONSUMER_SECRET=X npx -y @modelcontextprotocol/inspector npx <local-path>/fatsecret-mcp
+kubectl -n fatsecret-mcp get certificate fatsecret-mcp-tls -w
 ```
 
-## 📄 License
+Smoke test:
 
-MIT License - see [LICENSE](LICENSE) file for details.
+```bash
+curl -sS https://fatsecret-mcp.YOURDOMAIN.com/healthz
+# → {"status":"ok"}
+
+curl -sS https://fatsecret-mcp.YOURDOMAIN.com/mcp -X POST \
+  -H "Authorization: Bearer $MCP_BEARER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+# → JSON-RPC initialize response with Mcp-Session-Id in the response headers
+```
+
+---
+
+## 5. Register the server in claude.ai
+
+1. Open <https://claude.ai/settings/connectors>.
+2. **Add custom connector**.
+3. Fields:
+   - **Name**: `FatSecret`
+   - **Remote MCP server URL**: `https://fatsecret-mcp.YOURDOMAIN.com/mcp`
+   - **Custom header**: `Authorization: Bearer <MCP_BEARER_TOKEN>`
+4. Save. claude.ai will call `initialize` and `tools/list`; you should see
+   the FatSecret tool set show up. Test by asking "What did I eat today?"
+   — Claude will call `get_food_entries` for the current date.
+
+---
+
+## Local development
+
+Run the HTTP server locally without K8s:
+
+```bash
+# Populate .env with the same five FATSECRET_* + MCP_BEARER_TOKEN values
+cp .env.example .env
+
+# Node 20.6+ supports --env-file natively
+npm run build
+node --env-file=.env dist/http-server.js
+```
+
+Run the stdio variant against Claude Desktop / Claude Code (useful for
+diffing behaviour vs. the remote deployment):
+
+```bash
+npm run build
+node --env-file=.env dist/index.js
+```
+
+---
+
+## Available tools
+
+The full ~40-tool set inherited from upstream is documented at
+[fliptheweb/fatsecret-mcp](https://github.com/fliptheweb/fatsecret-mcp#-available-tools).
+Highlights relevant to a coaching workflow:
+
+- `search_foods`, `get_food`, `find_food_by_barcode`, `autocomplete_foods`
+- `get_food_entries`, **`get_food_entries_month`** (daily calorie & macro
+  summary for a calendar month — the monthly nutrition view), `create_food_entry`,
+  `edit_food_entry`, `delete_food_entry`, `copy_food_entries`
+- `get_weight_month`, `update_weight`
+- `get_exercise_entries_month`, `get_exercises`
+- `get_profile`
+
+The auth tools (`setup_credentials`, `start_auth`, `complete_auth`) are
+**not exposed** over HTTP — they only make sense for the local stdio
+bootstrap. `check_auth_status` is also auth-tool-suite-only and so is
+disabled in HTTP mode.
+
+---
+
+## Operational notes
+
+- **Read-only root FS.** The container runs with `readOnlyRootFilesystem: true`.
+  This is fine for HTTP mode (no config file writes), but if you ever run
+  the stdio binary inside the container (e.g. for ad-hoc bootstrap), you'll
+  need an `emptyDir` volume mounted at `/home/app/.fatsecret-mcp/`.
+- **Token rotation.** When you regenerate the OAuth token (e.g. after
+  revoking on FatSecret's side), re-run `npm run bootstrap`, update the
+  Secret, and `kubectl rollout restart deployment/fatsecret-mcp -n fatsecret-mcp`.
+- **Rotating the bearer token.** Change `MCP_BEARER_TOKEN` in the Secret,
+  restart, then update the header in the claude.ai connector config.
+- **Egress IP.** If FatSecret IP restrictions are enabled, make sure your
+  cluster's SNAT/egress IP is allow-listed — otherwise every call returns
+  an opaque OAuth error.
+
+---
+
+## Credits & licence
+
+- Upstream FatSecret MCP implementation: [fliptheweb/fatsecret-mcp](https://github.com/fliptheweb/fatsecret-mcp) (MIT).
+- Original prior art (stdio-only, hand-rolled OAuth 1.0a): [fcoury/fatsecret-mcp](https://github.com/fcoury/fatsecret-mcp) (MIT).
+- This fork: MIT. See [LICENSE](LICENSE).

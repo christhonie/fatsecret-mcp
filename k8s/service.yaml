@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fatsecret-mcp
+  namespace: fatsecret-mcp
+  labels:
+    app.kubernetes.io/name: fatsecret-mcp
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: fatsecret-mcp
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP

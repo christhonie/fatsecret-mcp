@@ -5,9 +5,10 @@ A remote MCP server that exposes your FatSecret nutrition diary to
 
 Forked from [fliptheweb/fatsecret-mcp](https://github.com/fliptheweb/fatsecret-mcp).
 This fork swaps the stdio transport for **Streamable HTTP**
-(MCP spec 2025-03-26+), gates the endpoint with a shared bearer token, and
-adds a Dockerfile + Kubernetes manifests for deployment behind a TLS
-ingress with cert-manager.
+(MCP spec 2025-03-26+), implements OAuth 2.1 with PKCE so claude.ai's
+custom-connector UI can register and authenticate against it, and adds
+a Dockerfile + Kubernetes manifests for deployment behind a TLS ingress
+with cert-manager.
 
 The upstream tool set (~40 tools: food search, recipes, food diary, monthly
 nutrition summary, weight, exercises, favorites, saved meals) is preserved
@@ -18,22 +19,27 @@ verbatim — only the transport layer and credential loading were changed.
 ## Architecture
 
 ```
-            HTTPS                bearer token             pre-authed
-claude.ai ──────────► Ingress ──────────────► /mcp ──────► FatSecret API
-                      (cert-manager,            │           (OAuth 1.0a)
-                       Let's Encrypt)           │
-                                    Deployment (1 replica)
-                                    └─ envFrom: fatsecret-mcp-secrets
+                   OAuth 2.1 + PKCE        OAuth 1.0a (pre-authed)
+claude.ai ─────► /authorize, /token ─────► /mcp ─────────► FatSecret API
+                 (this server is the              │         (single user's
+                  authorization server)           │          baked-in token)
+                                       Deployment (1 replica)
+                                       └─ envFrom: fatsecret-mcp-secrets
 ```
 
 - **Single-user.** The pre-authenticated OAuth 1.0a user token is provisioned
   once locally via `npm run bootstrap` and baked into a Kubernetes Secret.
-  There is no per-user auth flow on the deployed instance — `start_auth`,
-  `complete_auth` and `setup_credentials` are deliberately disabled when
-  running over HTTP.
-- **Bearer-token auth.** All `/mcp` traffic must present
-  `Authorization: Bearer <MCP_BEARER_TOKEN>`. claude.ai supports custom
-  headers per connector.
+  There is no per-user FatSecret auth flow on the deployed instance —
+  `start_auth`, `complete_auth` and `setup_credentials` are deliberately
+  disabled when running over HTTP.
+- **OAuth 2.1 + PKCE for the connector.** claude.ai's custom-connector UI
+  requires the MCP server to *be* an OAuth 2.0 authorization server. The
+  deployment ships a minimal one (see `src/oauth-provider.ts`) that
+  exposes `/.well-known/oauth-authorization-server`,
+  `/.well-known/oauth-protected-resource`, `/authorize`, `/token`, and
+  `/revoke`. There is a single pre-registered client whose
+  `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` you paste into claude.ai.
+  Authorization is "always approve" — the operator is the only user.
 - **Stateful sessions.** The server allocates an `Mcp-Session-Id` on
   initialize and keeps one in-memory MCP server per session, which also
   lets the OAuth 2.0 cache (used for public food search) live across calls.
@@ -84,11 +90,15 @@ FATSECRET_ACCESS_TOKEN=...
 FATSECRET_ACCESS_TOKEN_SECRET=...
 ```
 
-Also generate the bearer token that claude.ai will present:
+Also generate an OAuth client ID + secret that claude.ai will use to
+authenticate against this server:
 
 ```bash
-openssl rand -hex 32
+echo "OAUTH_CLIENT_ID=fsmcp-$(openssl rand -hex 8)"
+echo "OAUTH_CLIENT_SECRET=$(openssl rand -hex 32)"
 ```
+
+Keep these values — you'll paste them into claude.ai's connector UI later.
 
 ---
 
@@ -127,8 +137,19 @@ kubectl -n mcp create secret generic fatsecret-mcp-secrets \
   --from-literal=FATSECRET_CONSUMER_SECRET=...     \
   --from-literal=FATSECRET_ACCESS_TOKEN=...        \
   --from-literal=FATSECRET_ACCESS_TOKEN_SECRET=... \
-  --from-literal=MCP_BEARER_TOKEN=...
+  --from-literal=OAUTH_CLIENT_ID=...               \
+  --from-literal=OAUTH_CLIENT_SECRET=...
 ```
+
+By default the server pre-registers these redirect URIs for the OAuth
+client (see [src/http-server.ts](src/http-server.ts)):
+
+- `https://claude.ai/api/mcp/auth_callback`
+- `https://claude.com/api/mcp/auth_callback`
+- `http://localhost:3000/callback`
+
+If claude.ai's actual callback URL differs, override via the
+`OAUTH_REDIRECT_URIS` env var (comma-separated, exact-match per OAuth 2.1).
 
 Watch the rollout and cert issuance:
 
@@ -140,16 +161,29 @@ kubectl -n mcp get certificate fatsecret-mcp-christhonie-co-za-tls -w
 Smoke test:
 
 ```bash
+# Public probe
 curl -sS https://fatsecret-mcp.christhonie.co.za/healthz
 # → {"status":"ok"}
 
-curl -sS https://fatsecret-mcp.christhonie.co.za/mcp -X POST \
-  -H "Authorization: Bearer $MCP_BEARER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
-# → JSON-RPC initialize response with Mcp-Session-Id in the response headers
+# Authorization server metadata (RFC 8414)
+curl -sS https://fatsecret-mcp.christhonie.co.za/.well-known/oauth-authorization-server
+
+# Protected resource metadata (RFC 9728)
+curl -sS https://fatsecret-mcp.christhonie.co.za/.well-known/oauth-protected-resource
+
+# Unauthenticated MCP request: 401 with WWW-Authenticate header pointing
+# at the metadata URL — this is what claude.ai consumes to discover the
+# auth endpoints.
+curl -sS -D - -o /dev/null -X POST https://fatsecret-mcp.christhonie.co.za/mcp \
+  -H 'Content-Type: application/json' -d '{}'
 ```
+
+The full OAuth code-grant + PKCE flow is best driven by claude.ai itself
+(see next section). To drive it from curl, generate a PKCE pair
+(`code_verifier` random, `code_challenge = base64url(sha256(code_verifier))`),
+hit `/authorize` to receive a redirect with `?code=...`, POST that code to
+`/token` with the verifier, and use the returned `access_token` in
+`Authorization: Bearer <token>` on `/mcp`.
 
 ---
 
@@ -160,10 +194,16 @@ curl -sS https://fatsecret-mcp.christhonie.co.za/mcp -X POST \
 3. Fields:
    - **Name**: `FatSecret`
    - **Remote MCP server URL**: `https://fatsecret-mcp.christhonie.co.za/mcp`
-   - **Custom header**: `Authorization: Bearer <MCP_BEARER_TOKEN>`
-4. Save. claude.ai will call `initialize` and `tools/list`; you should see
-   the FatSecret tool set show up. Test by asking "What did I eat today?"
-   — Claude will call `get_food_entries` for the current date.
+   - **Advanced settings → OAuth Client ID**: the `OAUTH_CLIENT_ID` you generated
+   - **Advanced settings → OAuth Client Secret**: the `OAUTH_CLIENT_SECRET` you generated
+4. Save. claude.ai discovers the auth endpoints via
+   `/.well-known/oauth-authorization-server`, then walks you through an
+   OAuth 2.1 + PKCE authorization-code flow. Since the server runs in
+   single-user "always approve" mode, the authorize step is automatic —
+   no consent screen.
+5. After authorization, claude.ai calls `initialize` and `tools/list`;
+   you should see the FatSecret tool set. Test by asking "What did I eat
+   today?" — Claude will call `get_food_entries` for the current date.
 
 ---
 
@@ -172,7 +212,8 @@ curl -sS https://fatsecret-mcp.christhonie.co.za/mcp -X POST \
 Run the HTTP server locally without K8s:
 
 ```bash
-# Populate .env with the same five FATSECRET_* + MCP_BEARER_TOKEN values
+# Populate .env with the five FATSECRET_* values plus OAUTH_CLIENT_ID,
+# OAUTH_CLIENT_SECRET, and optionally OAUTH_ISSUER_URL / OAUTH_REDIRECT_URIS.
 cp .env.example .env
 
 # Node 20.6+ supports --env-file natively
@@ -220,8 +261,14 @@ disabled in HTTP mode.
 - **Token rotation.** When you regenerate the OAuth token (e.g. after
   revoking on FatSecret's side), re-run `npm run bootstrap`, update the
   Secret, and `kubectl -n mcp rollout restart deployment/fatsecret-mcp`.
-- **Rotating the bearer token.** Change `MCP_BEARER_TOKEN` in the Secret,
-  restart, then update the header in the claude.ai connector config.
+- **Rotating the OAuth client credentials.** Change `OAUTH_CLIENT_ID`
+  and/or `OAUTH_CLIENT_SECRET` in the Secret, restart the deployment,
+  then re-enter the new values in the claude.ai connector config (which
+  forces a fresh OAuth authorization-code exchange).
+- **Rotating the redirect URIs.** If claude.ai changes its callback URL,
+  override the comma-separated `OAUTH_REDIRECT_URIS` env var on the
+  Deployment (add it under `env:` in [k8s/deployment.yaml](k8s/deployment.yaml))
+  and restart.
 - **Egress IP.** If FatSecret IP restrictions are enabled, make sure your
   cluster's SNAT/egress IP is allow-listed — otherwise every call returns
   an opaque OAuth error.

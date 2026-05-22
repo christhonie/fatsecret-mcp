@@ -71,6 +71,31 @@ export class FatSecretMcpServer {
     // Load config: persistent file first, env vars override
     this.loadConfig();
 
+    // Surfaces FatSecret errors instead of letting tools return `text(undefined)`
+    // (which becomes an opaque "tool execution error" on the client). Handles
+    // both non-2xx responses and FatSecret's HTTP-200-with-{"error":{…}} bodies.
+    const errorMiddleware: Middleware = {
+      onResponse: async ({ response }) => {
+        if (!response.ok) {
+          let detail = '';
+          try { detail = await response.clone().text(); } catch { /* ignore */ }
+          throw new Error(`FatSecret API error: HTTP ${response.status} ${detail}`.trim());
+        }
+        try {
+          const peek = (await response.clone().json()) as { error?: { code?: number; message?: string } };
+          if (peek && typeof peek === 'object' && peek.error) {
+            const code = peek.error.code ?? '?';
+            const message = peek.error.message ?? JSON.stringify(peek.error);
+            throw new Error(`FatSecret API error ${code}: ${message}`);
+          }
+        } catch (err) {
+          if (err instanceof Error && err.message.startsWith('FatSecret API error')) throw err;
+          // Non-JSON success body — nothing to inspect.
+        }
+        return response;
+      },
+    };
+
     // Public API client with OAuth 2.0
     this.publicClient = createClient<PublicPaths>({ baseUrl: BASE_URL });
     const oauth2Middleware: Middleware = {
@@ -81,6 +106,7 @@ export class FatSecretMcpServer {
       },
     };
     this.publicClient.use(oauth2Middleware);
+    this.publicClient.use(errorMiddleware);
 
     // Profile API client with OAuth 1.0 (params in query string, not Authorization header)
     this.profileClient = createClient<ProfilePaths>({ baseUrl: BASE_URL });
@@ -96,6 +122,7 @@ export class FatSecretMcpServer {
       },
     };
     this.profileClient.use(oauth1Middleware);
+    this.profileClient.use(errorMiddleware);
 
     const instructions = opts.allowAuthTools !== false
       ? [

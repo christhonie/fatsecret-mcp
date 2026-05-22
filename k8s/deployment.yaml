@@ -30,7 +30,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: fatsecret-mcp
-          image: docker.io/christhonie/fatsecret-mcp:0.3.0
+          image: docker.io/christhonie/fatsecret-mcp:0.3.1
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

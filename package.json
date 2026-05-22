@@ -1,6 +1,6 @@
 {
   "name": "fatsecret-mcp-remote",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Remote (Streamable HTTP) FatSecret MCP server for claude.ai custom connectors. Forked from fliptheweb/fatsecret-mcp.",
   "main": "dist/http-server.js",
   "type": "module",

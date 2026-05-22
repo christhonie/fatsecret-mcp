@@ -275,6 +275,46 @@ disabled in HTTP mode.
 
 ---
 
+## Generalising this pattern
+
+If you're building the *next* remote MCP wrapper (hevy-mcp, Wahoo Kickr,
+Strava, anything else), don't re-derive the architecture from this
+project alone — read the playbook at
+[~/dev/ai-skills-develop/skills/devops/remote-mcp-wrap/SKILL.md](../ai-skills-develop/skills/devops/remote-mcp-wrap/SKILL.md).
+It captures what's reusable (Streamable HTTP + OAuth 2.1 provider +
+K8s/ArgoCD/cert-manager pattern + per-node egress probe + the bootstrap
+CLI traps) and what varies per upstream (auth model, IP whitelisting).
+
+Concrete reusable assets in this repo:
+
+- [src/oauth-provider.ts](src/oauth-provider.ts) — copy-as-is. Single-user "always approve"
+  OAuth 2.1 authorization server. No FatSecret-specific code.
+- [src/http-server.ts](src/http-server.ts) — copy and adapt the upstream class import
+  + env-var names. The wiring (Express, mcpAuthRouter, requireBearerAuth,
+  per-session transport) is generic.
+- [Dockerfile](Dockerfile), [k8s/](k8s/), the ArgoCD app in
+  [../idl-xnl-jhb-rc01/argocd/fatsecret-mcp.yml](../idl-xnl-jhb-rc01/argocd/fatsecret-mcp.yml)
+  — copy and rename.
+
+Things that bit this project that you should NOT repeat:
+
+- Starting with a `MCP_BEARER_TOKEN` design. claude.ai's connector UI
+  doesn't accept custom headers — the OAuth 2.1 provider is mandatory.
+  Half a day lost; entire `http-server.ts` rewritten. See commit
+  `23a18f5 v0.2.0: replace bearer-token gate with OAuth 2.1 + PKCE`.
+- Hand-rolling masked-password input that mixes with `readline.question`
+  in the bootstrap CLI. The masked input takes over stdin in a state
+  that breaks the next readline question silently. See `src/bootstrap.ts`
+  comments.
+- Forgetting that `kubectl apply` doesn't drop removed Secret keys.
+  Use `delete + create` when changing schema (e.g. `MCP_BEARER_TOKEN`
+  → `OAUTH_CLIENT_ID`/`OAUTH_CLIENT_SECRET`).
+- Whitelisting only the egress IP of the node the pod happens to sit
+  on. The cluster is per-node SNAT — k01/k02/k03 each have their own
+  public egress IP and pods get scheduled to any of them. Whitelist all.
+
+---
+
 ## Credits & licence
 
 - Upstream FatSecret MCP implementation: [fliptheweb/fatsecret-mcp](https://github.com/fliptheweb/fatsecret-mcp) (MIT).

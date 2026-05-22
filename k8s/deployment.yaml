@@ -30,7 +30,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: fatsecret-mcp
-          image: docker.io/christhonie/fatsecret-mcp:0.2.0
+          image: docker.io/christhonie/fatsecret-mcp:0.3.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -46,6 +46,11 @@ spec:
               value: "0.0.0.0"
             - name: NODE_ENV
               value: "production"
+            # FatSecret OAuth 2.0 scope for public food/recipe endpoints.
+            # Premier plan: "premier barcode". Adding a scope the account is
+            # not entitled to fails the token request and breaks public search.
+            - name: FATSECRET_OAUTH2_SCOPE
+              value: "premier barcode"
           resources:
             requests:
               cpu: "50m"

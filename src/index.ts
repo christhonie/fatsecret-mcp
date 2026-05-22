@@ -237,7 +237,12 @@ export class FatSecretMcpServer {
         grant_type: 'client_credentials',
         client_id: this.clientId,
         client_secret: this.clientSecret,
-        scope: 'basic',
+        // FatSecret OAuth 2.0 scope. 'basic' is the free tier; 'premier'
+        // unlocks Premier nutrition data. Space-separate multiple scopes
+        // (e.g. "premier barcode localization"). Requesting a scope the
+        // account is not entitled to causes the whole token request to
+        // fail, so only list scopes your plan includes.
+        scope: process.env.FATSECRET_OAUTH2_SCOPE ?? 'basic',
       }),
     });
 

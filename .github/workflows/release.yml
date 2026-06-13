@@ -1,0 +1,105 @@
+name: '🚀 Release — build image & bump ArgoCD tag'
+
+# Release pipeline for a self-hosted MCP server deployed by ArgoCD.
+#
+# On every push to master (i.e. a merged PR) this builds and pushes a Docker image
+# tagged with the package.json version, THEN rewrites the image tag in
+# k8s/deployment.yaml and commits it back to master. ArgoCD watches this repo's
+# k8s/ directory on master, so that commit is what triggers the rollout.
+#
+# Ordering matters: the image must exist in the registry before the manifest
+# points at it, or ArgoCD rolls out a tag that can't be pulled (ImagePullBackOff).
+# The build step runs first and the commit step depends on it (same job, in order).
+#
+# CONTRACT: bump "version" in package.json in your PR. The image tag IS that
+# version. If the version is unchanged, the manifest doesn't change, so ArgoCD
+# does not roll (and with imagePullPolicy: IfNotPresent the node keeps the cached
+# image). One version = one release.
+#
+# This is the self-contained MCP release pattern documented in intervals-mcp's
+# docs/modules/ROOT/pages/cicd.adoc. To reuse it, change only the two env values
+# below (and the branch name if the repo's default branch is not master).
+
+on:
+  push:
+    branches: [master]
+    # Do NOT rebuild on doc-only changes, or on the bot's own tag-bump commit
+    # (which only touches k8s/**). Ignoring k8s/** is the primary guard against a
+    # self-trigger loop; the "[skip ci]" in the commit message is a second guard.
+    paths-ignore:
+      - '**.md'
+      - '**.adoc'
+      - 'docs/**'
+      - 'k8s/**'
+      - '.github/**'
+  workflow_dispatch: {}   # allow a manual re-build/redeploy of the current version
+
+env:
+  REGISTRY_USER: christhonie
+  IMAGE: docker.io/christhonie/fatsecret-mcp
+
+# The tag-bump commit needs write access to repository contents. An explicit
+# permissions block grants it for this run even when the repo's default workflow
+# permission is "read".
+permissions:
+  contents: write
+
+# Never run two releases for the same branch at once; don't cancel an in-flight
+# one (it may be mid-push).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build & deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version from package.json
+        id: ver
+        run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.REGISTRY_USER }}
+          password: ${{ secrets.DOCKER_PAT }}
+
+      # ── Build FIRST: the image must exist before the manifest references it ──
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── THEN bump the manifest tag and commit it back; ArgoCD picks it up ──
+      - name: Bump image tag in k8s/deployment.yaml
+        run: |
+          # Match only OUR image line. Escape regex metacharacters in IMAGE first
+          # (the dots in 'docker.io' would otherwise match any char), so the
+          # pattern keys off the exact prefix and never touches a future sidecar
+          # 'image:' line. '#' delimiter avoids clashing with the '/' in the path.
+          image_re=$(printf '%s' "$IMAGE" | sed -E 's/[][\\.^$*+?(){}|]/\\&/g')
+          sed -i -E "s#(image: ${image_re}:)[^[:space:]]+#\1${{ steps.ver.outputs.version }}#" k8s/deployment.yaml
+          echo "Manifest now:"; grep 'image:' k8s/deployment.yaml
+
+      - name: Commit and push tag bump
+        run: |
+          if git diff --quiet -- k8s/deployment.yaml; then
+            echo "Image tag already at ${{ steps.ver.outputs.version }} — nothing to commit (version not bumped)."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add k8s/deployment.yaml
+          git commit -m "ci: deploy ${IMAGE##*/}:${{ steps.ver.outputs.version }} [skip ci]"
+          git push origin HEAD:master

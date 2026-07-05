@@ -32,7 +32,12 @@ on:
       - 'docs/**'
       - 'k8s/**'
       - '.github/**'
-  workflow_dispatch: {}   # allow a manual re-build/redeploy of the current version
+  # Manually re-build and re-push the current version's image (same tag). Note
+  # this does NOT force a redeploy on its own: with the version unchanged the
+  # manifest doesn't change, so ArgoCD won't roll, and imagePullPolicy:
+  # IfNotPresent means the node keeps the already-cached image. Bump the version
+  # for an actual rollout.
+  workflow_dispatch: {}
 
 env:
   REGISTRY_USER: christhonie

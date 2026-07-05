@@ -158,10 +158,11 @@ export class MinimalOAuthProvider implements OAuthServerProvider {
     scopes?: string[],
     resource?: URL,
   ): Promise<OAuthTokens> {
-    const entry = await this.store.get<RefreshTokenEntry>('refresh', refreshToken);
+    // Atomically consume the old refresh token (rotation): concurrent refreshes
+    // with the same token cannot both mint new tokens — only one take() wins.
+    const entry = await this.store.take<RefreshTokenEntry>('refresh', refreshToken);
     if (!entry) throw new Error('Invalid refresh token');
     if (entry.clientId !== client.client_id) throw new Error('Refresh token does not match client');
-    await this.store.del('refresh', refreshToken);
     const effectiveScopes = scopes ?? entry.scopes;
     return this.issueTokens(
       client.client_id,

@@ -139,19 +139,16 @@ export class MinimalOAuthProvider implements OAuthServerProvider {
     redirectUri?: string,
     resource?: URL,
   ): Promise<OAuthTokens> {
-    const entry = await this.store.get<CodeEntry>('code', authorizationCode);
+    // Atomically consume the code (single-use): concurrent redemptions of the
+    // same code cannot both succeed — only one take() returns the entry.
+    const entry = await this.store.take<CodeEntry>('code', authorizationCode);
     if (!entry) throw new Error('Invalid authorization code');
-    if (entry.expiresAt < nowSec()) {
-      await this.store.del('code', authorizationCode);
-      throw new Error('Authorization code expired');
-    }
+    if (entry.expiresAt < nowSec()) throw new Error('Authorization code expired');
     if (entry.clientId !== client.client_id) throw new Error('Code does not match client');
     if (redirectUri && entry.redirectUri !== redirectUri) {
       throw new Error('redirect_uri mismatch');
     }
     // PKCE is verified by the SDK's token handler before this call.
-    await this.store.del('code', authorizationCode);
-
     return this.issueTokens(client.client_id, entry.scopes, entry.resource ?? resource?.toString());
   }
 

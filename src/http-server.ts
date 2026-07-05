@@ -21,6 +21,7 @@ import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { FatSecretMcpServer } from './index.js';
 import { MinimalOAuthProvider } from './oauth-provider.js';
+import { createOAuthStore } from './oauth-store.js';
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -58,15 +59,24 @@ requireEnv('FATSECRET_ACCESS_TOKEN_SECRET');
 const PORT = Number(process.env.PORT ?? 8000);
 const HOST = process.env.HOST ?? '0.0.0.0';
 
+// OAuth state store: Redis when REDIS_URL is set (survives rollouts), else
+// in-memory. The prefix isolates this server's keys in a shared Redis.
+const oauthStore = createOAuthStore('fatsecret-mcp:oauth');
+
 const provider = new MinimalOAuthProvider({
   clientId: OAUTH_CLIENT_ID,
   clientSecret: OAUTH_CLIENT_SECRET,
   redirectUris: REDIRECT_URIS,
   clientName: 'FatSecret MCP',
+  store: oauthStore,
 });
 
 const app = express();
 app.disable('x-powered-by');
+// Behind the nginx ingress, requests carry X-Forwarded-For. Trust the single
+// proxy hop so the MCP SDK's rate limiters (mounted on the OAuth routes) read
+// the real client IP instead of throwing ERR_ERL_UNEXPECTED_X_FORWARDED_FOR.
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
 
 // Health probe (unauthenticated).

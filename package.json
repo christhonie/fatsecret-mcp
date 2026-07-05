@@ -1,6 +1,6 @@
 {
   "name": "fatsecret-mcp-remote",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Remote (Streamable HTTP) FatSecret MCP server for claude.ai custom connectors. Forked from fliptheweb/fatsecret-mcp.",
   "main": "dist/http-server.js",
   "type": "module",
@@ -30,6 +30,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.0",
     "express": "^4.21.2",
+    "ioredis": "^5.11.1",
     "openapi-fetch": "^0.17.0",
     "zod": "^3.24.0"
   },

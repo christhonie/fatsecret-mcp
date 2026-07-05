@@ -8,10 +8,17 @@
  * pod rollouts (so claude.ai is not forced to re-authenticate after a deploy);
  * leave it unset for the original in-memory behaviour.
  *
- * Resilience: the Redis store degrades gracefully — on any Redis error a read
- * returns "miss" (the client re-authenticates, as it would today) and writes are
- * logged and dropped. A Redis outage therefore never makes the server crash or
- * hang; it just falls back to the pre-Redis behaviour for the duration.
+ * Resilience: reads (`get`/`take`) degrade gracefully — on any Redis error they
+ * return "miss" so the client re-authenticates, as it would today. Writes (`set`)
+ * PROPAGATE errors: a token we cannot persist is worse than a failed request (the
+ * client would receive a token that immediately fails verification), so issuance
+ * fails loudly and the client retries. A Redis outage never makes the server hang
+ * (ioredis rejects fast); it surfaces as a re-auth, never as replay or a phantom
+ * token.
+ *
+ * Single-use: `take` is an atomic get-and-delete (Redis GETDEL) used to redeem
+ * authorization codes and rotate refresh tokens, so concurrent requests cannot
+ * redeem the same code/token twice.
  */
 
 import Redis from 'ioredis';
@@ -22,6 +29,8 @@ export interface OAuthStore {
   /** ttlSeconds <= 0 means no expiry. */
   set(kind: StoreKind, key: string, value: unknown, ttlSeconds: number): Promise<void>;
   get<T>(kind: StoreKind, key: string): Promise<T | undefined>;
+  /** Atomic get-and-delete — single-use redemption. Fail-soft (undefined on error). */
+  take<T>(kind: StoreKind, key: string): Promise<T | undefined>;
   del(kind: StoreKind, key: string): Promise<void>;
 }
 
@@ -56,6 +65,16 @@ export class MemoryOAuthStore implements OAuthStore {
       this.maps[kind].delete(key);
       return undefined;
     }
+    return e.value as T;
+  }
+
+  async take<T>(kind: StoreKind, key: string): Promise<T | undefined> {
+    const e = this.maps[kind].get(key);
+    // Consume unconditionally: the key is single-use, so a hit that turns out
+    // to be expired is still removed. JS is single-threaded, so get+delete
+    // here is atomic with respect to other awaiting requests.
+    this.maps[kind].delete(key);
+    if (!e || e.expiresAtMs < Date.now()) return undefined;
     return e.value as T;
   }
 
@@ -100,12 +119,15 @@ export class RedisOAuthStore implements OAuthStore {
   }
 
   async set(kind: StoreKind, key: string, value: unknown, ttlSeconds: number): Promise<void> {
+    // Writes propagate errors (unlike reads): failing issuance is better than
+    // returning a token that was never persisted and cannot be verified.
     try {
       const s = JSON.stringify(value);
       if (ttlSeconds > 0) await this.redis.set(this.k(kind, key), s, 'EX', Math.ceil(ttlSeconds));
       else await this.redis.set(this.k(kind, key), s);
     } catch (e) {
       console.error(`[oauth-store] set ${kind} failed: ${(e as Error).message}`);
+      throw e;
     }
   }
 
@@ -115,6 +137,18 @@ export class RedisOAuthStore implements OAuthStore {
       return s ? (JSON.parse(s) as T) : undefined;
     } catch (e) {
       console.error(`[oauth-store] get ${kind} failed: ${(e as Error).message}`);
+      return undefined;
+    }
+  }
+
+  async take<T>(kind: StoreKind, key: string): Promise<T | undefined> {
+    try {
+      // GETDEL (Redis 6.2+) reads and deletes atomically, so two concurrent
+      // redemptions of the same code/refresh token cannot both succeed.
+      const s = await this.redis.getdel(this.k(kind, key));
+      return s ? (JSON.parse(s) as T) : undefined;
+    } catch (e) {
+      console.error(`[oauth-store] take ${kind} failed: ${(e as Error).message}`);
       return undefined;
     }
   }

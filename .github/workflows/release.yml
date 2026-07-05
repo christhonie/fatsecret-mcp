@@ -97,6 +97,17 @@ jobs:
           sed -i -E "s#(image: ${image_re}:)[^[:space:]]+#\1${{ steps.ver.outputs.version }}#" k8s/deployment.yaml
           echo "Manifest now:"; grep 'image:' k8s/deployment.yaml
 
+          # Fail fast if the manifest does NOT end up pointing at the expected
+          # image:version. This holds both when sed rewrote the tag and when it
+          # was already at this version (a legit no-op the next step handles).
+          # It only trips when sed matched nothing — e.g. the manifest was
+          # reformatted or switched to a digest — where the build/push would
+          # otherwise succeed but the deploy silently never happens.
+          if ! grep -qF "image: ${IMAGE}:${{ steps.ver.outputs.version }}" k8s/deployment.yaml; then
+            echo "::error::k8s/deployment.yaml does not contain 'image: ${IMAGE}:${{ steps.ver.outputs.version }}' after the tag bump — the sed pattern did not match. Refusing to continue." >&2
+            exit 1
+          fi
+
       - name: Commit and push tag bump
         run: |
           if git diff --quiet -- k8s/deployment.yaml; then

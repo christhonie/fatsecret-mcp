@@ -1,16 +1,15 @@
 /**
- * Minimal OAuth 2.0 authorization server for the FatSecret MCP custom connector.
+ * Minimal OAuth 2.0 authorization server for a single-user remote MCP connector.
  *
- * Designed for a single-user personal deployment:
- *   - One pre-registered OAuth client (CLIENT_ID + CLIENT_SECRET come from env).
- *   - "Always approve" authorization — there's no user-consent screen because
- *     the deployment serves a single end-user (the operator).
- *   - In-memory storage for codes / access tokens / refresh tokens; survives
- *     for the lifetime of the pod. A single-replica deployment is assumed.
+ * Generic — no upstream-specific logic. Reusable across MCP servers (see the
+ * remote-mcp-wrap skill). State (codes / access tokens / refresh tokens) lives
+ * in a pluggable OAuthStore: in-memory by default, or Redis-backed (set
+ * REDIS_URL) so the OAuth state survives pod rollouts and claude.ai is not forced
+ * to re-authenticate after every deploy.
+ *
+ *   - One pre-registered OAuth client (CLIENT_ID + CLIENT_SECRET from env).
+ *   - "Always approve" authorization — single end-user, no consent UI.
  *   - PKCE is validated locally by the SDK (skipLocalPkceValidation=false).
- *
- * If you ever scale beyond one replica or need durability across restarts,
- * swap the Maps for Redis-backed stores. The provider interface stays the same.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -25,27 +24,28 @@ import type {
   OAuthTokens,
 } from '@modelcontextprotocol/sdk/shared/auth.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import type { OAuthStore } from './oauth-store.js';
 
 interface CodeEntry {
   clientId: string;
   redirectUri: string;
   codeChallenge: string;
   scopes: string[];
-  resource?: URL;
+  resource?: string;
   expiresAt: number;
 }
 
 interface AccessTokenEntry {
   clientId: string;
   scopes: string[];
-  resource?: URL;
+  resource?: string;
   expiresAt: number;
 }
 
 interface RefreshTokenEntry {
   clientId: string;
   scopes: string[];
-  resource?: URL;
+  resource?: string;
 }
 
 export interface MinimalOAuthProviderOptions {
@@ -53,6 +53,8 @@ export interface MinimalOAuthProviderOptions {
   clientSecret: string;
   /** Pre-registered redirect URIs. Exact-match per OAuth 2.1 (loopback gets port wildcard). */
   redirectUris: string[];
+  /** Persistent or in-memory storage for codes/tokens. */
+  store: OAuthStore;
   /** Seconds. Defaults to 1 hour. */
   accessTokenTtl?: number;
   /** Seconds. Defaults to 30 days. */
@@ -70,15 +72,14 @@ export class MinimalOAuthProvider implements OAuthServerProvider {
   readonly clientsStore: OAuthRegisteredClientsStore;
 
   private readonly client: OAuthClientInformationFull;
-  private readonly codes = new Map<string, CodeEntry>();
-  private readonly accessTokens = new Map<string, AccessTokenEntry>();
-  private readonly refreshTokens = new Map<string, RefreshTokenEntry>();
+  private readonly store: OAuthStore;
 
   private readonly accessTokenTtl: number;
   private readonly refreshTokenTtl: number;
   private readonly codeTtl: number;
 
   constructor(opts: MinimalOAuthProviderOptions) {
+    this.store = opts.store;
     this.accessTokenTtl = opts.accessTokenTtl ?? 3600;
     this.refreshTokenTtl = opts.refreshTokenTtl ?? 60 * 60 * 24 * 30;
     this.codeTtl = opts.codeTtl ?? 600;
@@ -90,21 +91,13 @@ export class MinimalOAuthProvider implements OAuthServerProvider {
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       token_endpoint_auth_method: 'client_secret_post',
-      client_name: opts.clientName ?? 'FatSecret MCP',
+      client_name: opts.clientName ?? 'MCP',
     };
 
     this.clientsStore = {
       getClient: (id) => (id === this.client.client_id ? this.client : undefined),
       // No DCR — the client is fixed (the user enters its id/secret in claude.ai).
     };
-
-    setInterval(() => this.cleanup(), 60_000).unref();
-  }
-
-  private cleanup() {
-    const t = nowSec();
-    for (const [k, v] of this.codes) if (v.expiresAt < t) this.codes.delete(k);
-    for (const [k, v] of this.accessTokens) if (v.expiresAt < t) this.accessTokens.delete(k);
   }
 
   async authorize(
@@ -114,14 +107,15 @@ export class MinimalOAuthProvider implements OAuthServerProvider {
   ): Promise<void> {
     // Single-user "always approve". Mint a code immediately and redirect.
     const code = mintOpaque();
-    this.codes.set(code, {
+    const entry: CodeEntry = {
       clientId: client.client_id,
       redirectUri: params.redirectUri,
       codeChallenge: params.codeChallenge,
       scopes: params.scopes ?? [],
-      resource: params.resource,
+      resource: params.resource?.toString(),
       expiresAt: nowSec() + this.codeTtl,
-    });
+    };
+    await this.store.set('code', code, entry, this.codeTtl);
     const url = new URL(params.redirectUri);
     url.searchParams.set('code', code);
     if (params.state) url.searchParams.set('state', params.state);
@@ -133,7 +127,7 @@ export class MinimalOAuthProvider implements OAuthServerProvider {
     _client: OAuthClientInformationFull,
     authorizationCode: string,
   ): Promise<string> {
-    const entry = this.codes.get(authorizationCode);
+    const entry = await this.store.get<CodeEntry>('code', authorizationCode);
     if (!entry) throw new Error('Invalid authorization code');
     return entry.codeChallenge;
   }
@@ -145,20 +139,17 @@ export class MinimalOAuthProvider implements OAuthServerProvider {
     redirectUri?: string,
     resource?: URL,
   ): Promise<OAuthTokens> {
-    const entry = this.codes.get(authorizationCode);
+    // Atomically consume the code (single-use): concurrent redemptions of the
+    // same code cannot both succeed — only one take() returns the entry.
+    const entry = await this.store.take<CodeEntry>('code', authorizationCode);
     if (!entry) throw new Error('Invalid authorization code');
-    if (entry.expiresAt < nowSec()) {
-      this.codes.delete(authorizationCode);
-      throw new Error('Authorization code expired');
-    }
+    if (entry.expiresAt < nowSec()) throw new Error('Authorization code expired');
     if (entry.clientId !== client.client_id) throw new Error('Code does not match client');
     if (redirectUri && entry.redirectUri !== redirectUri) {
       throw new Error('redirect_uri mismatch');
     }
     // PKCE is verified by the SDK's token handler before this call.
-    this.codes.delete(authorizationCode);
-
-    return this.issueTokens(client.client_id, entry.scopes, entry.resource ?? resource);
+    return this.issueTokens(client.client_id, entry.scopes, entry.resource ?? resource?.toString());
   }
 
   async exchangeRefreshToken(
@@ -167,19 +158,24 @@ export class MinimalOAuthProvider implements OAuthServerProvider {
     scopes?: string[],
     resource?: URL,
   ): Promise<OAuthTokens> {
-    const entry = this.refreshTokens.get(refreshToken);
+    // Atomically consume the old refresh token (rotation): concurrent refreshes
+    // with the same token cannot both mint new tokens — only one take() wins.
+    const entry = await this.store.take<RefreshTokenEntry>('refresh', refreshToken);
     if (!entry) throw new Error('Invalid refresh token');
     if (entry.clientId !== client.client_id) throw new Error('Refresh token does not match client');
-    this.refreshTokens.delete(refreshToken);
     const effectiveScopes = scopes ?? entry.scopes;
-    return this.issueTokens(client.client_id, effectiveScopes, entry.resource ?? resource);
+    return this.issueTokens(
+      client.client_id,
+      effectiveScopes,
+      entry.resource ?? resource?.toString(),
+    );
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    const entry = this.accessTokens.get(token);
+    const entry = await this.store.get<AccessTokenEntry>('access', token);
     if (!entry) throw new Error('Invalid access token');
     if (entry.expiresAt < nowSec()) {
-      this.accessTokens.delete(token);
+      await this.store.del('access', token);
       throw new Error('Access token expired');
     }
     return {
@@ -187,7 +183,7 @@ export class MinimalOAuthProvider implements OAuthServerProvider {
       clientId: entry.clientId,
       scopes: entry.scopes,
       expiresAt: entry.expiresAt,
-      resource: entry.resource,
+      resource: entry.resource ? new URL(entry.resource) : undefined,
     };
   }
 
@@ -195,27 +191,40 @@ export class MinimalOAuthProvider implements OAuthServerProvider {
     client: OAuthClientInformationFull,
     request: { token: string; token_type_hint?: string },
   ): Promise<void> {
-    // Best-effort revoke — try both maps; ignore mismatches per RFC 7009.
-    const accessEntry = this.accessTokens.get(request.token);
+    // Best-effort revoke — try both kinds; ignore mismatches per RFC 7009.
+    const accessEntry = await this.store.get<AccessTokenEntry>('access', request.token);
     if (accessEntry && accessEntry.clientId === client.client_id) {
-      this.accessTokens.delete(request.token);
+      await this.store.del('access', request.token);
     }
-    const refreshEntry = this.refreshTokens.get(request.token);
+    const refreshEntry = await this.store.get<RefreshTokenEntry>('refresh', request.token);
     if (refreshEntry && refreshEntry.clientId === client.client_id) {
-      this.refreshTokens.delete(request.token);
+      await this.store.del('refresh', request.token);
     }
   }
 
-  private issueTokens(clientId: string, scopes: string[], resource?: URL): OAuthTokens {
+  private async issueTokens(
+    clientId: string,
+    scopes: string[],
+    resource?: string,
+  ): Promise<OAuthTokens> {
     const accessToken = mintOpaque();
     const refreshToken = mintOpaque();
-    this.accessTokens.set(accessToken, {
+    const accessEntry: AccessTokenEntry = {
       clientId,
       scopes,
       resource,
       expiresAt: nowSec() + this.accessTokenTtl,
-    });
-    this.refreshTokens.set(refreshToken, { clientId, scopes, resource });
+    };
+    const refreshEntry: RefreshTokenEntry = { clientId, scopes, resource };
+    await this.store.set('access', accessToken, accessEntry, this.accessTokenTtl);
+    // Intentional behaviour change vs. the previous in-memory implementation,
+    // where refresh tokens never expired (the old Map was never cleaned up).
+    // Refresh tokens now carry refreshTokenTtl (default 30 days) and are rotated
+    // on every refresh — each exchangeRefreshToken issues a fresh token with a
+    // fresh 30-day window. So an actively-used connector never expires; the TTL
+    // only forces re-auth after ~30 days of total inactivity. This is better
+    // hygiene than an immortal refresh token persisted in Redis.
+    await this.store.set('refresh', refreshToken, refreshEntry, this.refreshTokenTtl);
     return {
       access_token: accessToken,
       token_type: 'Bearer',

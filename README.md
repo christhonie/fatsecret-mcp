@@ -121,7 +121,7 @@ and exposes a `/healthz` endpoint for the readiness/liveness probes.
 Deployment is driven by ArgoCD. The Application manifest lives in
 [idl-xnl-jhb-rc01/argocd/fatsecret-mcp.yml](https://github.com/christhonie/idl-xnl-jhb-rc01/blob/main/argocd/fatsecret-mcp.yml)
 and syncs the [k8s/](k8s/) directory of this repo (with `secret.template.yaml`
-excluded). Pushing a commit to `master` here triggers an ArgoCD sync.
+excluded). Pushing a commit to `main` here triggers an ArgoCD sync.
 
 The one manual prerequisite is the Secret — values must never enter git:
 

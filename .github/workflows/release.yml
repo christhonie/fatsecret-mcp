@@ -2,10 +2,10 @@ name: '🚀 Release — build image & bump ArgoCD tag'
 
 # Release pipeline for a self-hosted MCP server deployed by ArgoCD.
 #
-# On every push to master (i.e. a merged PR) this builds and pushes a Docker image
+# On every push to main (i.e. a merged PR) this builds and pushes a Docker image
 # tagged with the package.json version, THEN rewrites the image tag in
-# k8s/deployment.yaml and commits it back to master. ArgoCD watches this repo's
-# k8s/ directory on master, so that commit is what triggers the rollout.
+# k8s/deployment.yaml and commits it back to main. ArgoCD watches this repo's
+# k8s/ directory on main, so that commit is what triggers the rollout.
 #
 # Ordering matters: the image must exist in the registry before the manifest
 # points at it, or ArgoCD rolls out a tag that can't be pulled (ImagePullBackOff).
@@ -18,11 +18,11 @@ name: '🚀 Release — build image & bump ArgoCD tag'
 #
 # This is the self-contained MCP release pattern documented in intervals-mcp's
 # docs/modules/ROOT/pages/cicd.adoc. To reuse it, change only the two env values
-# below (and the branch name if the repo's default branch is not master).
+# below (and the branch name if the repo's default branch is not main).
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     # Do NOT rebuild on doc-only changes, or on the bot's own tag-bump commit
     # (which only touches k8s/**). Ignoring k8s/** is the primary guard against a
     # self-trigger loop; the "[skip ci]" in the commit message is a second guard.
@@ -118,4 +118,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add k8s/deployment.yaml
           git commit -m "ci: deploy ${IMAGE##*/}:${{ steps.ver.outputs.version }} [skip ci]"
-          git push origin HEAD:master
+          git push origin HEAD:main
